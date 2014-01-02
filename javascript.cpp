@@ -46,14 +46,21 @@ static JSRuntime *interp_rt;
 static JSContext *interp_cx;
 static JSObject  *interp_globals;
 
-static JSClass global_class = {"global", JSCLASS_GLOBAL_FLAGS,
-    JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
-    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, JS_FinalizeStub,
-    JSCLASS_NO_OPTIONAL_MEMBERS};
-static JSClass list_entry_class = {"list_entry", JSPROP_READONLY|JSPROP_ENUMERATE,
-    JS_PropertyStub, JS_PropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
-    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, JS_FinalizeStub,
-    JSCLASS_NO_OPTIONAL_MEMBERS};
+static JSClass global_class = {
+    "global", JSCLASS_GLOBAL_FLAGS,
+    JS_PropertyStub, JS_DeletePropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
+    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, NULL,
+    nullptr /* checkAccess */, nullptr /* call */, nullptr /* hasInstance */, nullptr /* construct */, nullptr,
+    {nullptr}
+};
+
+static JSClass list_entry_class = {
+    "list_entry", JSPROP_READONLY|JSPROP_ENUMERATE,
+    JS_PropertyStub, JS_DeletePropertyStub, JS_PropertyStub, JS_StrictPropertyStub,
+    JS_EnumerateStub, JS_ResolveStub, JS_ConvertStub, nullptr,
+    nullptr /* checkAccess */, nullptr /* call */, nullptr /* hasInstance */, nullptr /* construct */, nullptr,
+    {nullptr}
+};
 
 enum hook_type
 {
@@ -96,6 +103,23 @@ class js_script
 
 static list<js_script*> js_script_list;
 
+/* compat function.. TODO: remove */
+static JSObject *
+JS_ConstructObjectWithArguments(JSContext *cx, JSClass *clasp, JSObject *proto,
+								JSObject *parent, unsigned argc, jsval *argv)
+{
+	JSObject *global = JS_GetGlobalForScopeChain(cx);
+	jsval v;
+
+	if (!global || !JS_GetProperty(cx, global, clasp->name, &v))
+		return nullptr;
+	if (JSVAL_IS_PRIMITIVE(v))
+	{
+	JS_ReportError(cx, "cannot construct object: constructor is gone");
+		return nullptr;
+	}
+	return JS_New(cx, JSVAL_TO_OBJECT(v), argc, argv);
+} 
 
 /* utility functions */
 
@@ -183,6 +207,7 @@ hjs_util_datefromtime (JSContext *context, time_t server_time)
 	JSObject *date_constructor;
 	jsval date_prototype;
 	jsval args[1];
+	jsval ret;
 	struct tm *timeinfo;
 
 	// Use current time if no time is given
@@ -193,24 +218,25 @@ hjs_util_datefromtime (JSContext *context, time_t server_time)
 		server_time = mktime(timeinfo);
 	}
 
-	if (!JS_EnterLocalRootScope(context))
-		return JSVAL_VOID;
+	JS_BeginRequest(context);
 
-	if (!JS_GetClassObject(context, JS_GetGlobalObject(context), JSProto_Date, &date_constructor))
+	if (!JS_GetClassObject(context, JS_GetGlobalForScopeChain(context), JSProto_Date, &date_constructor))
 		return JSVAL_VOID;
 
 	if (!JS_GetProperty(context, date_constructor, "prototype", &date_prototype))
 		return JSVAL_VOID;
 
-	date_class = JS_GET_CLASS(context, JSVAL_TO_OBJECT (date_prototype));
+	date_class = JS_GetClass(JSVAL_TO_OBJECT (date_prototype));
 
-	if (!JS_NewNumberValue(context, ((double) server_time) * 1000, &(args[0])))
+	args[0] = JS_NumberValue(((double) server_time) * 1000);
+	if (!args[0].isNumber())
 		return JSVAL_VOID;
 
 	date = JS_ConstructObjectWithArguments(context, date_class, nullptr, nullptr, 1, args);
 
-	JS_LeaveLocalRootScope(context);
-	return OBJECT_TO_JSVAL(date);
+	ret = OBJECT_TO_JSVAL(date);
+	JS_EndRequest(context);
+	return ret;
 }
 
 static time_t
@@ -897,9 +923,11 @@ hjs_findcontext (JSContext *context, unsigned argc, jsval *vp)
 	if (cchannel)
 		JS_free(context, cchannel);
 
+	ret = JS_NumberValue((long)ctx);
+
 	if (!ctx)
 		JS_SET_RVAL (context, vp, JSVAL_NULL);
-	else if (!JS_NewNumberValue(context, (long)ctx, &ret))
+	else if (!ret.isNumber())
 		JS_SET_RVAL (context, vp, JSVAL_VOID);
 	else
 		JS_SET_RVAL (context, vp, ret);
@@ -918,7 +946,9 @@ hjs_getcontext (JSContext *context, unsigned argc, jsval *vp)
 
 	ctx = hexchat_get_context (ph);
 
-	if (!JS_NewNumberValue(context, (long)ctx, &ret))
+	ret = JS_NumberValue((long)ctx);
+
+	if (!ret.isNumber())
 		JS_SET_RVAL (context, vp, JSVAL_VOID);
 	else
 		JS_SET_RVAL (context, vp, ret);
@@ -980,7 +1010,8 @@ hjs_hookcmd (JSContext *context, unsigned argc, jsval *vp)
 
 	script->add_hook (hook, HOOK_CMD, context, funcobj, userdata, hexhook);
 
-	if (!JS_NewNumberValue(context, (long)hexhook, &ret))
+	ret = JS_NumberValue((long)hexhook);
+	if (!ret.isNumber())
 		JS_SET_RVAL (context, vp, JSVAL_VOID);
 	else
 		JS_SET_RVAL (context, vp, ret);
@@ -1014,7 +1045,8 @@ hjs_hookprint (JSContext *context, unsigned argc, jsval *vp)
 
 	script->add_hook (hook, HOOK_PRINT, context, funcobj, userdata, hexhook);
 
-	if (!JS_NewNumberValue(context, (long)hexhook, &ret))
+	ret = JS_NumberValue((long)hexhook);
+	if (!ret.isNumber())
 		JS_SET_RVAL (context, vp, JSVAL_VOID);
 	else
 		JS_SET_RVAL (context, vp, ret);
@@ -1051,7 +1083,8 @@ hjs_hookspecial (JSContext *context, unsigned argc, jsval *vp)
 
 	script->add_hook (hook, HOOK_PRINT, context, funcobj, userdata, hexhook);
 
-	if (!JS_NewNumberValue(context, (long)hexhook, &ret))
+	ret = JS_NumberValue((long)hexhook);
+	if (!ret.isNumber())
 		JS_SET_RVAL (context, vp, JSVAL_VOID);
 	else
 		JS_SET_RVAL (context, vp, ret);
@@ -1085,7 +1118,8 @@ hjs_hookserver (JSContext *context, unsigned argc, jsval *vp)
 
 	script->add_hook (hook, HOOK_SERVER, context, funcobj, userdata, hexhook);
 
-	if (!JS_NewNumberValue(context, (long)hexhook, &ret))
+	ret = JS_NumberValue((long)hexhook);
+	if (!ret.isNumber())
 		JS_SET_RVAL (context, vp, JSVAL_VOID);
 	else
 		JS_SET_RVAL (context, vp, ret);
@@ -1115,7 +1149,8 @@ hjs_hooktimer (JSContext *context, unsigned argc, jsval *vp)
 
 	script->add_hook (hook, HOOK_TIMER, context, funcobj, userdata, hexhook);
 
-	if (!JS_NewNumberValue(context, (long)hexhook, &ret))
+	ret = JS_NumberValue((long)hexhook);
+	if (!ret.isNumber())
 		JS_SET_RVAL (context, vp, JSVAL_VOID);
 	else
 		JS_SET_RVAL (context, vp, ret);
@@ -1218,7 +1253,7 @@ hjs_listpluginpref (JSContext *context, unsigned argc, jsval *vp)
 	hexchat_plugin* prefph = hjs_script_gethandle (context);
 	JSObject* js_list;
 	JSString* list_item;
-	jsuint list_len;
+	uint list_len;
 	char list[4096];
 	char* token;
 	int result;
@@ -1340,32 +1375,32 @@ hjs_getnickcolor (JSContext *context, unsigned argc, jsval *vp)
 }
 
 static JSFunctionSpec hexchat_functions[] = {
-	{"print", hjs_print, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"emit_print", hjs_emitprint, 6, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"emit_print_at", hjs_emitprintat, 7, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"command", hjs_command, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"nickcmp", hjs_nickcmp, 2, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"strip", hjs_strip, 2, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"get_info", hjs_getinfo, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"get_prefs", hjs_getprefs, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"hook_command", hjs_hookcmd, 5, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"hook_server", hjs_hookserver, 4, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"hook_timer", hjs_hooktimer, 3, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"hook_print", hjs_hookprint, 5, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"hook_special", hjs_hookspecial, 5, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"hook_unload", hjs_hookunload, 2, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"unhook", hjs_unhook, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"get_list", hjs_getlist, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"find_context", hjs_findcontext, 2, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"get_context", hjs_getcontext, 0, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"set_context", hjs_setcontext, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"set_pluginpref", hjs_setpluginpref, 2, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"get_pluginpref", hjs_getpluginpref, 2, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"list_pluginpref", hjs_listpluginpref, 0, JSPROP_READONLY|JSPROP_PERMANENT},
-	{"del_pluginpref", hjs_delpluginpref, 1, JSPROP_READONLY|JSPROP_PERMANENT},
+	JS_FS("print", hjs_print, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("emit_print", hjs_emitprint, 6, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("emit_print_at", hjs_emitprintat, 7, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("command", hjs_command, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("nickcmp", hjs_nickcmp, 2, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("strip", hjs_strip, 2, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("get_info", hjs_getinfo, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("get_prefs", hjs_getprefs, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("hook_command", hjs_hookcmd, 5, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("hook_server", hjs_hookserver, 4, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("hook_timer", hjs_hooktimer, 3, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("hook_print", hjs_hookprint, 5, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("hook_special", hjs_hookspecial, 5, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("hook_unload", hjs_hookunload, 2, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("unhook", hjs_unhook, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("get_list", hjs_getlist, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("find_context", hjs_findcontext, 2, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("get_context", hjs_getcontext, 0, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("set_context", hjs_setcontext, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("set_pluginpref", hjs_setpluginpref, 2, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("get_pluginpref", hjs_getpluginpref, 2, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("list_pluginpref", hjs_listpluginpref, 0, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS("del_pluginpref", hjs_delpluginpref, 1, JSPROP_READONLY|JSPROP_PERMANENT),
 	/* convenience functions not part of api */
-	{"get_nickcolor", hjs_getnickcolor, 1, JSPROP_READONLY|JSPROP_PERMANENT},
-	{0}
+	JS_FS("get_nickcolor", hjs_getnickcolor, 1, JSPROP_READONLY|JSPROP_PERMANENT),
+	JS_FS_END
 };
 
 
@@ -1374,8 +1409,9 @@ static JSFunctionSpec hexchat_functions[] = {
 static int
 js_init (JSContext **cx, JSRuntime **rt, JSObject **globals, bool fake)
 {
+	JS::CompartmentOptions options;
 	// 1MB per runtime, unsure how much is actually needed for such basic scripts
-	*rt = JS_NewRuntime (1024 * 1024);
+	*rt = JS_NewRuntime (1024 * 1024, JS_USE_HELPER_THREADS);
 	if (*rt == nullptr)
 		return 0;
 
@@ -1383,9 +1419,9 @@ js_init (JSContext **cx, JSRuntime **rt, JSObject **globals, bool fake)
 	if (*cx == nullptr)
 		return 0;
 	JS_SetOptions (*cx, JSOPTION_VAROBJFIX);
-	JS_SetVersion (*cx, JSVERSION_LATEST);
+	options.setVersion(JSVERSION_LATEST);
 
-	*globals = JS_NewCompartmentAndGlobalObject (*cx, &global_class, nullptr);
+	*globals = JS_NewGlobalObject (*cx, &global_class, nullptr, options);
 	if (*globals == nullptr)
 		return 0;
 
